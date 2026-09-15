@@ -138,6 +138,25 @@ export function createApp(store, { now = () => new Date() } = {}) {
     }
     throw httpError(400, "bad_request", `${field} 必须是有效数值，空值/空字符串不被接受`);
   }
+  // 请求体必须是“普通对象”：拒绝缺失（undefined）、null、数组、标量
+  function requireObject(input, what) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw httpError(400, "bad_request", `${what} 的请求体必须是非空对象`);
+    }
+    return input;
+  }
+  function requireString(value, field, { nonEmpty = true } = {}) {
+    if (typeof value !== "string" || (nonEmpty && value.trim() === "")) {
+      throw httpError(400, "bad_request", `${field} ${nonEmpty ? "必须是非空字符串" : "必须是字符串"}`);
+    }
+    return value;
+  }
+  function requirePlainObject(value, field) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw httpError(400, "bad_request", `${field} 必须是对象`);
+    }
+    return value;
+  }
   // 建档等写入接口不得携带这些系统保留字段
   const RESERVED_FIELDS = ["id", "version", "ropes", "plans", "lastSafeResult", "tasks", "logs"];
   function rejectReserved(input) {
@@ -178,21 +197,47 @@ export function createApp(store, { now = () => new Date() } = {}) {
   }
   // 对原始登记输入做空值级校验（在 normalize 之前，避免空串被 Number() 转成 0）
   function validateRopePayload(input) {
+    requireObject(input, "索登记");
     if (!Array.isArray(input.ropes) || !input.ropes.length) {
       throw httpError(400, "bad_request", "ropes 必须是非空数组");
     }
     for (const r of input.ropes) {
-      if (!r || typeof r !== "object") throw httpError(400, "bad_request", "每根索必须是对象");
+      if (!r || typeof r !== "object" || Array.isArray(r)) {
+        throw httpError(400, "bad_request", "每根索必须是对象");
+      }
       const id = String(r.id ?? "").trim();
       if (!id) throw httpError(400, "bad_request", "索 id 不能为空");
       strictNumber(r.tension, `索 ${id} 当前张力`);
       strictNumber(r.min, `索 ${id} 安全下限`);
       strictNumber(r.max, `索 ${id} 安全上限`);
+      if (r.influence !== undefined && (!r.influence || typeof r.influence !== "object" || Array.isArray(r.influence))) {
+        throw httpError(400, "bad_request", `索 ${id} 的影响系数必须是对象`);
+      }
+      if (r.name !== undefined && typeof r.name !== "string") {
+        throw httpError(400, "bad_request", `索 ${id} 的名称必须是字符串`);
+      }
       for (const [k, v] of Object.entries(r.influence ?? {})) {
         if (!String(k).trim()) throw httpError(400, "bad_request", `索 ${id} 的影响系数键不能为空`);
         strictNumber(v, `索 ${id} 对 ${k} 的影响系数`);
       }
     }
+  }
+  // 方案预览载荷：{ targets: [{ id, target }] }；null/空对象/类型错误一律 400
+  function validatePlanPayload(input) {
+    requireObject(input, "方案预览");
+    if (!Array.isArray(input.targets) || !input.targets.length) {
+      throw httpError(400, "bad_request", "targets 必须是非空数组");
+    }
+    for (const t of input.targets) {
+      if (!t || typeof t !== "object" || Array.isArray(t)) {
+        throw httpError(400, "bad_request", "targets 每项必须是对象");
+      }
+      if (t.id === undefined || t.id === null || String(t.id).trim() === "") {
+        throw httpError(400, "bad_request", "目标索 id 必须是非空字符串");
+      }
+      strictNumber(t.target, `索 ${t.id} 的目标张力`);
+    }
+    return input.targets.map(t => ({ id: String(t.id).trim(), target: Number(t.target) }));
   }
   function validateRopeInput(ropes) {
     try {
@@ -269,8 +314,24 @@ export function createApp(store, { now = () => new Date() } = {}) {
 
       // 原 建档（保留：无鉴权，行为与旧版一致，新增联调字段）
       if (req.method === "POST" && url.pathname === "/api/items") {
-        const input = await body(req);
+        const input = requireObject(await body(req), "建档");
         rejectReserved(input); // 建档不得覆盖版本/索集合/方案/日志等系统字段
+        requireString(input.code, "模型编号 code");
+        if (input.shipType !== undefined && typeof input.shipType !== "string") {
+          throw httpError(400, "bad_request", "船型 shipType 必须是字符串");
+        }
+        if (input.owner !== undefined && typeof input.owner !== "string") {
+          throw httpError(400, "bad_request", "负责人 owner 必须是字符串");
+        }
+        if (input.ownerToken !== undefined && typeof input.ownerToken !== "string") {
+          throw httpError(400, "bad_request", "ownerToken 必须是字符串");
+        }
+        if (input.mastCount !== undefined && input.mastCount !== "") {
+          strictNumber(input.mastCount, "桅杆数量 mastCount");
+        }
+        if (input.status !== undefined && !statLabels.includes(input.status)) {
+          throw httpError(400, "bad_request", `status 必须是以下之一：${statLabels.join("、")}`);
+        }
         const item = await store.mutate(d => {
           const it = {
             id: newId("MR-"),
@@ -298,10 +359,18 @@ export function createApp(store, { now = () => new Date() } = {}) {
       // 原 状态变更（保留）
       if (detail && req.method === "PATCH") {
         const key = decodeURIComponent(detail[1]);
-        const input = await body(req);
+        const input = requireObject(await body(req), "状态变更");
+        if (Object.keys(input).some(k => k !== "status")) {
+          throw httpError(400, "bad_request", "该接口仅允许更新 status 字段");
+        }
+        if (!("status" in input)) throw httpError(400, "bad_request", "缺少 status 字段");
+        requireString(input.status, "status");
+        if (!statLabels.includes(input.status)) {
+          throw httpError(400, "bad_request", `status 必须是以下之一：${statLabels.join("、")}`);
+        }
         const item = await store.mutate(d => {
           const it = findItem(d, key);
-          if ("status" in input) it.status = input.status;
+          it.status = input.status;
           pushLog(it, "状态", "更新为" + it.status);
           bump(it);
           return it;
@@ -312,10 +381,16 @@ export function createApp(store, { now = () => new Date() } = {}) {
       const logPath = url.pathname.match(/^\/api\/items\/([^/]+)\/logs$/);
       if (logPath && req.method === "POST") {
         const key = decodeURIComponent(logPath[1]);
-        const input = await body(req);
+        const input = requireObject(await body(req), "备注");
+        if (!("note" in input) || typeof input.note !== "string" || input.note.trim() === "") {
+          throw httpError(400, "bad_request", "note 必须是非空字符串");
+        }
+        if (input.step !== undefined && typeof input.step !== "string") {
+          throw httpError(400, "bad_request", "step 必须是字符串");
+        }
         const item = await store.mutate(d => {
           const it = findItem(d, key);
-          pushLog(it, input.step || "记录", input.note || "");
+          pushLog(it, input.step || "记录", input.note);
           bump(it);
           return it;
         });
@@ -325,7 +400,14 @@ export function createApp(store, { now = () => new Date() } = {}) {
       const actionPath = url.pathname.match(/^\/api\/items\/([^/]+)\/action$/);
       if (actionPath && req.method === "POST") {
         const key = decodeURIComponent(actionPath[1]);
-        const input = await body(req);
+        const input = requireObject(await body(req), "帆索任务");
+        requireString(input.position, "索具位置 position");
+        if (input.tension === undefined || input.tension === null || typeof input.tension !== "string" || input.tension.trim() === "") {
+          throw httpError(400, "bad_request", "松紧状态 tension 必须是非空字符串");
+        }
+        if (input.note !== undefined && typeof input.note !== "string") {
+          throw httpError(400, "bad_request", "note 必须是字符串");
+        }
         const item = await store.mutate(d => {
           const it = findItem(d, key);
           it.tasks ||= [];
@@ -375,7 +457,7 @@ export function createApp(store, { now = () => new Date() } = {}) {
         const key = decodeURIComponent(plansPath[1]);
         const operator = operatorOf(req);
         const input = await body(req);
-        const targets = input.targets;
+        const targets = validatePlanPayload(input); // null/空对象/缺 targets/类型错误在此 400，原数据不动
         const fp = fingerprint({ version: null, targets }); // 指纹看目标集合；版本另存
         const { item, plan, idempotent } = await store.mutate(d => {
           const it = findItem(d, key);
@@ -411,7 +493,15 @@ export function createApp(store, { now = () => new Date() } = {}) {
         const key = decodeURIComponent(applyPath[1]);
         const planId = decodeURIComponent(applyPath[2]);
         const operator = operatorOf(req);
-        const input = await body(req).catch(() => ({}));
+        // 应用允许空请求体；但只要带了体就必须是对象，且 expectedVersion 若给出必须是数值
+        const raw = await body(req);
+        if (raw !== undefined && (!raw || typeof raw !== "object" || Array.isArray(raw))) {
+          throw httpError(400, "bad_request", "应用请求体必须是对象");
+        }
+        const input = raw ?? {};
+        if (input.expectedVersion !== undefined) {
+          strictNumber(input.expectedVersion, "expectedVersion");
+        }
         if (applyingPlanIds.has(planId)) {
           return send(res, 409, { error: "plan_locked", message: "方案正在被另一个请求应用（并发只允许一次成功），请查询现有结果" });
         }
@@ -477,6 +567,10 @@ export function createApp(store, { now = () => new Date() } = {}) {
         const key = decodeURIComponent(undoPath[1]);
         const planId = decodeURIComponent(undoPath[2]);
         const operator = operatorOf(req);
+        const undoRaw = await body(req);
+        if (!undoRaw || typeof undoRaw !== "object" || Array.isArray(undoRaw)) {
+          throw httpError(400, "bad_request", "撤销请求体必须是对象（可传 {}）");
+        }
         const item = await store.mutate(d => {
           const it = findItem(d, key);
           authorize(it, operator);
