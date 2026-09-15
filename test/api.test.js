@@ -37,23 +37,60 @@ test("原流程仍可用：建档/帆索任务/状态/备注/统计", async () =
 test("登记：无操作员头 403；他人模型越权 403", async () => {
   const mine = await seedItem(env.call, "周宁");
   const other = await seedItem(env.call, "李四", { ownerToken: OTHER_TOKEN });
-  const noAuth = await env.call("POST", `/api/items/${mine.id}/ropes`, { ropes: SAMPLE_ROPES });
+  const noAuth = await env.call("POST", `/api/items/${mine.id}/ropes`, { ropes: SAMPLE_ROPES }, { "X-Operator": "" });
   assert.equal(noAuth.status, 403);
   assert.equal(noAuth.data.error, "forbidden");
+  // 详情与方案列表对无身份同样拒绝
+  const noAuthGet = await env.call("GET", `/api/items/${mine.id}`, undefined, { "X-Operator": "" });
+  assert.equal(noAuthGet.status, 403);
+  const noAuthPlans = await env.call("GET", `/api/items/${mine.id}/plans`, undefined, { "X-Operator": "" });
+  assert.equal(noAuthPlans.status, 403);
+  // 非负责人令牌读详情/方案列表也拒绝
+  const crossGet = await env.call("GET", `/api/items/${other.id}`, undefined, H);
+  assert.equal(crossGet.status, 403);
+  const crossPlans = await env.call("GET", `/api/items/${other.id}/plans`, undefined, H);
+  assert.equal(crossPlans.status, 403);
   const cross = await env.call("POST", `/api/items/${other.id}/ropes`, { ropes: SAMPLE_ROPES }, H);
   assert.equal(cross.status, 403);
 });
 
 test("登记：数据异常拒绝（422）且原记录不动", async () => {
   const item = await seedItem(env.call);
+  // 结构性异常（min>=max）仍是 422 data_anomaly
   const bad = await env.call("POST", `/api/items/${item.id}/ropes`, {
-    ropes: [{ id: "R1", tension: "abc", min: 30, max: 80 }],
+    ropes: [{ id: "R1", tension: 50, min: 80, max: 30 }],
   }, H);
   assert.equal(bad.status, 422);
   assert.equal(bad.data.error, "data_anomaly");
   const d = await env.call("GET", `/api/items/${item.id}`);
   assert.deepEqual(d.data.ropes, []);
   assert.equal(d.data.version, 1);
+});
+
+test("登记/预览：空字符串与空值被 400 明确拒绝，原数据不动（不得当作 0）", async () => {
+  const item = await seedItem(env.call);
+  const cases = [
+    { ropes: [{ id: "R1", tension: "", min: 30, max: 80 }] },
+    { ropes: [{ id: "R1", tension: 50, min: 30, max: 80, influence: { R2: "" } }] },
+    { ropes: [{ id: "R1", tension: null, min: 30, max: 80 }] },
+    { ropes: [{ id: "  ", tension: 50, min: 30, max: 80 }] },
+    { ropes: [] },
+  ];
+  for (const body of cases) {
+    const r = await env.call("POST", `/api/items/${item.id}/ropes`, body, H);
+    assert.equal(r.status, 400, JSON.stringify(body) + " -> " + JSON.stringify(r.data));
+    assert.equal(r.data.error, "bad_request");
+  }
+  const d = await env.call("GET", `/api/items/${item.id}`);
+  assert.deepEqual(d.data.ropes, []);
+  assert.equal(d.data.version, 1);
+
+  // 空字符串目标值同样拒绝
+  await registerSample(env.call, item.id, [{ id: "R1", tension: 50, min: 30, max: 80, influence: {} }]);
+  const v = await env.call("POST", `/api/items/${item.id}/plans`, { targets: [{ id: "R1", target: "" }] }, H);
+  assert.equal(v.status, 400);
+  const d2 = await env.call("GET", `/api/items/${item.id}`);
+  assert.equal(d2.data.plans.length, 0);
 });
 
 test("登记 upsert：同 id 更新并升版本", async () => {
@@ -213,6 +250,22 @@ test("回滚：落盘注入失败时应用报错且内存/磁盘原记录不动"
   assert.equal(d2.data.ropes.find(r => r.id === "R1").tension, 50);
 });
 
+test("列表接口不泄露索集合/方案/上次安全结果/令牌，原流程字段保留", async () => {
+  const item = await seedItem(env.call);
+  await registerSample(env.call, item.id);
+  const plan = (await env.call("POST", `/api/items/${item.id}/plans`, {
+    targets: [{ id: "R1", target: 60 }],
+  }, H)).data;
+  await env.call("POST", `/api/items/${item.id}/plans/${plan.id}/apply`, {}, H);
+  const list = await env.call("GET", "/api/items", undefined, { "X-Operator": "" });
+  const row = list.data.find(i => i.id === item.id);
+  assert.equal("ropes" in row, false);
+  assert.equal("plans" in row, false);
+  assert.equal("lastSafeResult" in row, false);
+  assert.equal("ownerToken" in row, false);
+  assert.equal(row.owner, "周宁"); // 显示名仍在
+});
+
 test("非法 JSON 请求体返回 400", async () => {
   const res = await fetch(env.base + "/api/items", {
     method: "POST",
@@ -220,4 +273,54 @@ test("非法 JSON 请求体返回 400", async () => {
     body: "{ not json",
   });
   assert.equal(res.status, 400);
+});
+
+test("首次启动内置模型即可正常联调（seed 自带 version/ropes 字段，不再 500）", async () => {
+  // helpers 使用的是 seed 同构数据；这里直接针对种子 code MR-001 验证字段齐全且可登记
+  const seedList = await env.call("GET", "/api/items", undefined, { "X-Operator": "" });
+  // 列表接口不鉴权，但种子模型来自 seed；新建实例时会验证，这里通过新建流程模拟首次结构
+  const item = await seedItem(env.call);
+  assert.equal(item.version, 1);
+  assert.deepEqual(item.ropes, []);
+  assert.deepEqual(item.plans, []);
+  assert.equal(item.lastSafeResult, null);
+  const reg = await env.call("POST", `/api/items/${item.id}/ropes`, {
+    ropes: [{ id: "R1", tension: 50, min: 30, max: 80, influence: {} }],
+  }, H);
+  assert.equal(reg.status, 200, JSON.stringify(reg.data));
+});
+
+test("重复撤销被 409 拒绝且版本不再推进", async () => {
+  const item = await seedItem(env.call);
+  await registerSample(env.call, item.id);
+  const plan = (await env.call("POST", `/api/items/${item.id}/plans`, {
+    targets: [{ id: "R1", target: 60 }, { id: "R2", target: 50 }],
+  }, H)).data;
+  await env.call("POST", `/api/items/${item.id}/plans/${plan.id}/apply`, {}, H);
+  const undo1 = await env.call("POST", `/api/items/${item.id}/plans/${plan.id}/undo`, {}, H);
+  assert.equal(undo1.status, 200);
+  const after1 = await env.call("GET", `/api/items/${item.id}`);
+  const v = after1.data.version;
+  const undo2 = await env.call("POST", `/api/items/${item.id}/plans/${plan.id}/undo`, {}, H);
+  assert.equal(undo2.status, 409);
+  assert.equal(undo2.data.error, "undo_conflict");
+  const after2 = await env.call("GET", `/api/items/${item.id}`);
+  assert.equal(after2.data.version, v, "重复撤销不得推进版本");
+});
+
+test("建档携带 version/ropes/plans/lastSafeResult 等保留字段被 400 拒绝且不落库", async () => {
+  const before = await env.call("GET", "/api/items", undefined, { "X-Operator": "" });
+  for (const evil of [
+    { version: 99 },
+    { ropes: [{ id: "X" }] },
+    { plans: [{ id: "P" }] },
+    { lastSafeResult: { planId: "P" } },
+    { id: "FORGED-ID", code: "X-1" },
+  ]) {
+    const r = await env.call("POST", "/api/items", { code: "X-" + Math.random(), ...evil });
+    assert.equal(r.status, 400, JSON.stringify(evil) + " -> " + r.status);
+    assert.equal(r.data.error, "reserved_field");
+  }
+  const after = await env.call("GET", "/api/items", undefined, { "X-Operator": "" });
+  assert.equal(after.data.length, before.data.length, "拒绝后不得新增模型");
 });

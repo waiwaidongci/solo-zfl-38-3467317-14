@@ -138,7 +138,7 @@ try {
   const applyText = await page.$eval("#applyResult .alert.ok", el => el.textContent);
   check("成功-原子应用成功", /原子应用成功/.test(applyText), applyText);
 
-  const after = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${itemKey}`)).json();
+  const after = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${itemKey}`, { headers: { "X-Operator": token } })).json();
   check("成功-后端张力已更新", Math.abs(after.ropes.find(r => r.id === "R1").tension - 60) < 0.02
     && Math.abs(after.ropes.find(r => r.id === "R2").tension - 50) < 0.02);
   check("成功-记录可撤销的上次安全结果", after.lastSafeResult && after.lastSafeResult.undoable === true);
@@ -149,7 +149,7 @@ try {
   check("成功-撤销按钮可用", undoEnabled);
   await page.click("#btnUndo");
   await new Promise(r => setTimeout(r, 400));
-  const undone = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${itemKey}`)).json();
+  const undone = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${itemKey}`, { headers: { "X-Operator": token } })).json();
   check("成功-撤销后张力恢复", undone.ropes.find(r => r.id === "R1").tension === 50
     && undone.ropes.find(r => r.id === "R2").tension === 40);
   check("成功-撤销后 lastSafeResult 不可再撤销", undone.lastSafeResult.undoable === false);
@@ -187,7 +187,7 @@ try {
   check("无解-页面明确显示阻塞", /无解/.test(blockedText));
   const applyDisabled = await page.$eval("#btnApply", el => el.disabled);
   check("无解-应用按钮保持禁用", applyDisabled);
-  const noSolDetail = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${encodeURIComponent(noSol.id)}`)).json();
+  const noSolDetail = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${encodeURIComponent(noSol.id)}`, { headers: { "X-Operator": token } })).json();
   check("无解-方案未落库、原记录不动", noSolDetail.plans.length === 0 && noSolDetail.version === 2);
 
   /* ---------- 场景三：过期版本冲突 ---------- */
@@ -225,7 +225,7 @@ try {
   }, { timeout: 5000 });
   const conflictText = await page.$eval("#applyResult .alert.block", el => el.textContent);
   check("冲突-过期版本应用被拒绝并提示", /冲突|过期版本/.test(conflictText), conflictText);
-  const confDetail = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${ckey}`)).json();
+  const confDetail = await (await fetch(`http://127.0.0.1:${PORT}/api/items/${ckey}`, { headers: { "X-Operator": token } })).json();
   check("冲突-张力未被错误应用", confDetail.ropes.find(r => r.id === "R1").tension === 51);
   check("冲突-方案仍为 draft 未生效", confDetail.plans.every(p => p.status !== "applied"));
 

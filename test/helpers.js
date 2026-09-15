@@ -21,7 +21,8 @@ export async function setupServer({ clock = [], persistDir } = {}) {
   async function call(method, path, body, headers = {}) {
     const res = await fetch(base + path, {
       method,
-      headers: { "Content-Type": "application/json", ...headers },
+      // 默认以种子负责人令牌调用；需要测无身份时显式传 { "X-Operator": "" }
+      headers: { "Content-Type": "application/json", "X-Operator": TOKEN, ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();

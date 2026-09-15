@@ -9,7 +9,12 @@ export const seed = {
   schemaVersion: 3,
   items: [
     {
+      id: "MR-SEED-001",
       code: "MR-001",
+      version: 1,
+      ropes: [],
+      plans: [],
+      lastSafeResult: null,
       shipType: "福船",
       scale: "1:48",
       mastCount: 3,
@@ -121,6 +126,24 @@ export function createApp(store, { now = () => new Date() } = {}) {
     if (!item) throw httpError(404, "item_not_found", `未找到模型 ${key}`);
     return item;
   }
+  // 严格数值：只接受有限 number 与非空数字字符串；拒绝 undefined/null/空串/布尔/非数字
+  function strictNumber(value, field) {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw httpError(400, "bad_request", `${field} 必须是有效数值`);
+      return value;
+    }
+    if (typeof value === "string" && value.trim() !== "") {
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    throw httpError(400, "bad_request", `${field} 必须是有效数值，空值/空字符串不被接受`);
+  }
+  // 建档等写入接口不得携带这些系统保留字段
+  const RESERVED_FIELDS = ["id", "version", "ropes", "plans", "lastSafeResult", "tasks", "logs"];
+  function rejectReserved(input) {
+    const hit = RESERVED_FIELDS.find(k => k in (input || {}));
+    if (hit) throw httpError(400, "reserved_field", `请求包含受保护字段 "${hit}"，该字段由系统维护，拒绝写入`);
+  }
   function computeStats(items) {
     const stats = Object.fromEntries(statLabels.map(label => [label, 0]));
     for (const item of items) if (stats[item.status] !== undefined) stats[item.status] += 1;
@@ -128,7 +151,13 @@ export function createApp(store, { now = () => new Date() } = {}) {
   }
   function summarize(item) {
     const logCount = (item.logs || []).length + (item.tasks || []).reduce((n, t) => n + (t.logs || []).length, 0);
-    return { ...item, logCount };
+    const { ownerToken, ...rest } = item; // 令牌绝不随响应下发
+    return { ...rest, logCount };
+  }
+  // 无鉴权的列表视图：剥离联调敏感数据（索集合/方案/上次安全结果），仅保留原流程所需字段
+  function listView(item) {
+    return Object.fromEntries(Object.entries(summarize(item)).filter(([k]) =>
+      !["ropes", "plans", "lastSafeResult"].includes(k)));
   }
   function pushLog(item, step, note) {
     item.logs ||= [];
@@ -140,11 +169,30 @@ export function createApp(store, { now = () => new Date() } = {}) {
     return {
       id: String(r.id),
       name: String(r.name ?? r.id),
-      tension: Number(r.tension),
-      min: Number(r.min),
-      max: Number(r.max),
-      influence: Object.fromEntries(Object.entries(r.influence ?? {}).map(([k, v]) => [String(k), Number(v)])),
+      tension: strictNumber(r.tension, `索 ${r.id} 当前张力`),
+      min: strictNumber(r.min, `索 ${r.id} 安全下限`),
+      max: strictNumber(r.max, `索 ${r.id} 安全上限`),
+      influence: Object.fromEntries(Object.entries(r.influence ?? {}).map(([k, v]) =>
+        [String(k), strictNumber(v, `索 ${r.id} 对 ${k} 的影响系数`)])),
     };
+  }
+  // 对原始登记输入做空值级校验（在 normalize 之前，避免空串被 Number() 转成 0）
+  function validateRopePayload(input) {
+    if (!Array.isArray(input.ropes) || !input.ropes.length) {
+      throw httpError(400, "bad_request", "ropes 必须是非空数组");
+    }
+    for (const r of input.ropes) {
+      if (!r || typeof r !== "object") throw httpError(400, "bad_request", "每根索必须是对象");
+      const id = String(r.id ?? "").trim();
+      if (!id) throw httpError(400, "bad_request", "索 id 不能为空");
+      strictNumber(r.tension, `索 ${id} 当前张力`);
+      strictNumber(r.min, `索 ${id} 安全下限`);
+      strictNumber(r.max, `索 ${id} 安全上限`);
+      for (const [k, v] of Object.entries(r.influence ?? {})) {
+        if (!String(k).trim()) throw httpError(400, "bad_request", `索 ${id} 的影响系数键不能为空`);
+        strictNumber(v, `索 ${id} 对 ${k} 的影响系数`);
+      }
+    }
   }
   function validateRopeInput(ropes) {
     try {
@@ -157,12 +205,11 @@ export function createApp(store, { now = () => new Date() } = {}) {
   function computePlan(item, targets) {
     if (!Array.isArray(targets) || !targets.length) throw httpError(400, "bad_request", "targets 必须是非空数组");
     for (const t of targets) {
-      const n = t && Number(t.target);
-      if (!t || t.id == null || !Number.isFinite(n)) {
-        throw httpError(400, "bad_request", "targets 每项需包含 id 与数值 target");
-      }
-      t.target = n;
-      t.id = String(t.id);
+      if (!t || typeof t !== "object") throw httpError(400, "bad_request", "targets 每项必须是对象");
+      if (t.id == null || String(t.id).trim() === "") throw httpError(400, "bad_request", "目标索 id 不能为空");
+      // 严格数值：空串/空值/布尔一律拒绝（Number("")===0 的隐式转换不得放行）
+      t.target = strictNumber(t.target, `索 ${t.id} 的目标张力`);
+      t.id = String(t.id).trim();
     }
     if (!item.ropes?.length) throw httpError(422, "ropes_empty", "尚未登记任何索，无法联调");
     const result = planAdjustment(item.ropes, targets);
@@ -214,7 +261,7 @@ export function createApp(store, { now = () => new Date() } = {}) {
 
       // ---------- 原有流程（只读部分保持不变） ----------
       if (req.method === "GET" && url.pathname === "/api/items") {
-        return send(res, 200, db.items.map(summarize));
+        return send(res, 200, db.items.map(listView));
       }
       if (req.method === "GET" && url.pathname === "/api/stats") {
         return send(res, 200, computeStats(db.items));
@@ -223,6 +270,7 @@ export function createApp(store, { now = () => new Date() } = {}) {
       // 原 建档（保留：无鉴权，行为与旧版一致，新增联调字段）
       if (req.method === "POST" && url.pathname === "/api/items") {
         const input = await body(req);
+        rejectReserved(input); // 建档不得覆盖版本/索集合/方案/日志等系统字段
         const item = await store.mutate(d => {
           const it = {
             id: newId("MR-"),
@@ -235,7 +283,6 @@ export function createApp(store, { now = () => new Date() } = {}) {
             logs: [{ at: now().toISOString(), step: "建档", note: "创建模型" }],
           };
           it.ownerToken = input.ownerToken || operatorOf(req) || asciiToken(input.owner) || "";
-          if (!it.ownerToken) it.ownerToken = "";
           d.items.unshift(it);
           return it;
         });
@@ -244,7 +291,9 @@ export function createApp(store, { now = () => new Date() } = {}) {
 
       const detail = url.pathname.match(/^\/api\/items\/([^/]+)$/);
       if (detail && req.method === "GET") {
-        return send(res, 200, summarize(findItem(db, decodeURIComponent(detail[1]))));
+        const item = findItem(db, decodeURIComponent(detail[1]));
+        authorize(item, operatorOf(req)); // 联调详情（含索集合/版本/安全结果）需操作员且不得越权
+        return send(res, 200, summarize(item));
       }
       // 原 状态变更（保留）
       if (detail && req.method === "PATCH") {
@@ -296,13 +345,14 @@ export function createApp(store, { now = () => new Date() } = {}) {
         if (req.method === "POST") {
           const operator = operatorOf(req);
           const input = await body(req);
-          if (!Array.isArray(input.ropes)) throw httpError(400, "bad_request", "ropes 必须是数组");
+          validateRopePayload(input); // 空值/空串/结构异常在此拒绝，原数据不动
           const clean = input.ropes.map(normalizeRope);
           const item = await store.mutate(d => {
             const it = findItem(d, key);
             authorize(it, operator);
+            const existing = Array.isArray(it.ropes) ? it.ropes : [];
             // 校验合并后的完整索集合（影响系数可引用此前已登记的索）；异常则整批拒绝、原记录不动
-            const byId = new Map(it.ropes.map(r => [r.id, r]));
+            const byId = new Map(existing.map(r => [r.id, r]));
             for (const r of clean) byId.set(r.id, r);
             validateRopeInput([...byId.values()]);
             it.ropes = [...byId.values()];
@@ -318,6 +368,7 @@ export function createApp(store, { now = () => new Date() } = {}) {
       const plansPath = url.pathname.match(/^\/api\/items\/([^/]+)\/plans$/);
       if (plansPath && req.method === "GET") {
         const item = findItem(db, decodeURIComponent(plansPath[1]));
+        authorize(item, operatorOf(req)); // 方案列表含调节明细，需操作员且不得越权
         return send(res, 200, item.plans.map(p => presentPlan(item, p)));
       }
       if (plansPath && req.method === "POST") {
@@ -432,7 +483,10 @@ export function createApp(store, { now = () => new Date() } = {}) {
           const plan = it.plans.find(p => p.id === planId);
           if (!plan) throw httpError(404, "plan_not_found", `未找到方案 ${planId}`);
           if (!it.lastSafeResult || it.lastSafeResult.planId !== planId) {
-            throw httpError(409, "undo_conflict", "只能撤销最近一次安全应用结果；该方案不是最近一次应用或已被撤销");
+            throw httpError(409, "undo_conflict", "只能撤销最近一次安全应用结果；该方案不是最近一次应用或尚未应用");
+          }
+          if (it.lastSafeResult.undoable !== true) {
+            throw httpError(409, "undo_conflict", "该安全结果已撤销，重复撤销被拒绝，版本不推进");
           }
           const byId = new Map(it.ropes.map(r => [r.id, r]));
           for (const b of it.lastSafeResult.tensionsBefore) {
