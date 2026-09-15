@@ -49,6 +49,110 @@ test("建档：空体/空对象/null/数组/标量/缺 code/类型错误全部 4
   assert.equal(after, before, "拒绝后模型数量不变");
 });
 
+test("建档：比例/材料/交付日期/船型/负责人为对象、数组、布尔或错误类型全部 400", async () => {
+  const before = (await env.call("GET", "/api/items", undefined, { "X-Operator": "" })).data.length;
+  const badFields = [
+    { scale: { x: 1 } }, { scale: ["1:48"] }, { scale: 48 }, { scale: true },
+    { riggingMaterial: { a: 1 } }, { riggingMaterial: ["蜡线"] }, { riggingMaterial: false }, { riggingMaterial: 3 },
+    { shipType: { x: 1 } }, { shipType: ["福船"] }, { shipType: true }, { shipType: 9 },
+    { owner: { x: 1 } }, { owner: ["周宁"] }, { owner: true },
+    { ownerToken: { x: 1 } }, { ownerToken: ["z"] }, { ownerToken: 1 },
+    { dueDate: { x: 1 } }, { dueDate: ["2026-01-01"] }, { dueDate: true },
+    { dueDate: 20260101 }, { dueDate: "2026-13-01" }, { dueDate: "2026/01/01" }, { dueDate: "not-a-date" },
+    { code: { x: 1 } }, { code: ["C1"] }, { code: true }, { code: 5 },
+    { unknownField: 1 },
+  ];
+  for (const extra of badFields) {
+    const r = await env.call("POST", "/api/items", { code: "C-" + Math.random().toString(36).slice(2, 7), ...extra }, {});
+    assert.equal(r.status, 400, JSON.stringify(extra) + " -> " + r.status + " " + JSON.stringify(r.data).slice(0, 120));
+  }
+  const after = (await env.call("GET", "/api/items", undefined, { "X-Operator": "" })).data.length;
+  assert.equal(after, before);
+  // 合法字段（数字 mastCount、合法日期）仍可建档
+  const ok = await env.call("POST", "/api/items", {
+    code: "TYPED-1", shipType: "福船", scale: "1:48", mastCount: 3,
+    riggingMaterial: "蜡线", owner: "周宁", ownerToken: TOKEN, dueDate: "2026-06-28",
+  }, {});
+  assert.equal(ok.status, 201, JSON.stringify(ok.data));
+});
+
+test("索登记：索 id 与名称为数字/布尔/对象/数组时 400，不被隐式转字符串", async () => {
+  const item = await seedItem(env.call);
+  const base = { tension: 50, min: 30, max: 80 };
+  const bad = [
+    { ropes: [{ ...base, id: 7 }] },
+    { ropes: [{ ...base, id: true }] },
+    { ropes: [{ ...base, id: { x: 1 } }] },
+    { ropes: [{ ...base, id: ["R1"] }] },
+    { ropes: [{ ...base, id: null }] },
+    { ropes: [{ id: "R1", ...base, name: 7 }] },
+    { ropes: [{ id: "R1", ...base, name: true }] },
+    { ropes: [{ id: "R1", ...base, name: { x: 1 } }] },
+    { ropes: [{ id: "R1", ...base, name: ["a"] }] },
+    { ropes: [{ id: "R1", ...base, influence: { R2: true } }] },
+    { ropes: [{ id: "R1", ...base, influence: { R2: {} } }] },
+    { ropes: [{ id: "R1", ...base, influence: { R2: [] } }] },
+    { ropes: [{ id: "R1", ...base, bogus: 1 }] },
+  ];
+  for (const body of bad) {
+    const r = await env.call("POST", `/api/items/${item.id}/ropes`, body, H);
+    assert.equal(r.status, 400, JSON.stringify(body) + " -> " + r.status + " " + JSON.stringify(r.data).slice(0, 120));
+  }
+  const d = await env.call("GET", `/api/items/${item.id}`);
+  assert.deepEqual(d.data.ropes, []);
+  assert.equal(d.data.version, 1);
+});
+
+test("方案预览：目标 id 为数字/布尔/对象/数组时 400", async () => {
+  const item = await seedItem(env.call);
+  await registerSample(env.call, item.id, [{ id: "R1", tension: 50, min: 30, max: 80, influence: {} }]);
+  const bad = [
+    { targets: [{ id: 7, target: 60 }] },
+    { targets: [{ id: true, target: 60 }] },
+    { targets: [{ id: { x: 1 }, target: 60 }] },
+    { targets: [{ id: ["R1"], target: 60 }] },
+    { targets: [{ id: null, target: 60 }] },
+    { targets: [{ id: "R1", target: {} }] },
+    { targets: [{ id: "R1", target: [] }] },
+    { targets: [{ id: "R1", target: 60, bogus: 1 }] },
+    { bogus: 1 },
+  ];
+  for (const body of bad) {
+    const r = await env.call("POST", `/api/items/${item.id}/plans`, body, H);
+    assert.equal(r.status, 400, JSON.stringify(body) + " -> " + r.status + " " + JSON.stringify(r.data).slice(0, 120));
+  }
+  const d = await env.call("GET", `/api/items/${item.id}`);
+  assert.equal(d.data.plans.length, 0);
+});
+
+test("备注/帆索任务：未知字段与布尔/对象字段 400，合法请求仍成功", async () => {
+  const item = await seedItem(env.call);
+  for (const body of [
+    { note: "x", bogus: 1 }, { step: { x: 1 }, note: "x" }, { step: 9, note: "x" },
+  ]) {
+    const r = await env.call("POST", `/api/items/${item.id}/logs`, body, {});
+    assert.equal(r.status, 400, JSON.stringify(body) + " -> " + r.status);
+  }
+  for (const body of [
+    { position: "前桅支索", tension: "偏松", bogus: 1 },
+    { position: true, tension: "偏松" },
+    { position: { x: 1 }, tension: "偏松" },
+    { position: ["p"], tension: "偏松" },
+    { position: "前桅支索", tension: true },
+    { position: "前桅支索", tension: {} },
+    { position: "前桅支索", tension: [], note: "x" },
+    { position: "前桅支索", tension: "偏松", note: { x: 1 } },
+  ]) {
+    const r = await env.call("POST", `/api/items/${item.id}/action`, body, {});
+    assert.equal(r.status, 400, JSON.stringify(body) + " -> " + r.status);
+  }
+  const d0 = await env.call("GET", `/api/items/${item.id}`);
+  assert.equal(d0.data.tasks.length, 0);
+  // 合法请求
+  const ok = await env.call("POST", `/api/items/${item.id}/action`, { position: "前桅支索", tension: "偏松", note: "ok" }, {});
+  assert.equal(ok.status, 201);
+});
+
 test("状态变更：空体/空对象/null/缺 status/非法 status/多余字段全部 400，版本不变", async () => {
   const item = await seedItem(env.call);
   const v0 = (await env.call("GET", `/api/items/${item.id}`)).data.version;

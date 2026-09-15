@@ -157,6 +157,40 @@ export function createApp(store, { now = () => new Date() } = {}) {
     }
     return value;
   }
+  // 可选字符串：缺省/undefined 放行；但 null/布尔/数字/对象/数组/（要求非空时的）空串拒绝
+  function requireOptionalString(value, field, { nonEmpty = false } = {}) {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || (nonEmpty && value.trim() === "")) {
+      throw httpError(400, "bad_request", `${field} 必须是${nonEmpty ? "非空" : ""}字符串`);
+    }
+    return value;
+  }
+  // 未知字段一律拒绝，防止前端误传字段被静默落库
+  function requireKnownFields(input, allowed, what) {
+    const unknown = Object.keys(input).filter(k => !allowed.includes(k));
+    if (unknown.length) {
+      throw httpError(400, "bad_request", `${what} 包含未知字段：${unknown.join("、")}（允许：${allowed.join("、")}）`);
+    }
+  }
+  // 日期：接受 YYYY-MM-DD 且必须是真实日历日期；缺省放行
+  function requireOptionalDate(value, field) {
+    if (value === undefined || value === "") return undefined;
+    if (typeof value !== "string") throw httpError(400, "bad_request", `${field} 必须是 YYYY-MM-DD 日期字符串`);
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+    if (!m) throw httpError(400, "bad_request", `${field} 必须是 YYYY-MM-DD 格式`);
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (d.getFullYear() !== Number(m[1]) || d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])) {
+      throw httpError(400, "bad_request", `${field} 不是有效日期`);
+    }
+    return value.trim();
+  }
+  // 编号必须是非空字符串：拒绝数字/布尔/对象/数组被隐式转字符串
+  function requireId(value, field) {
+    if (typeof value !== "string" || value.trim() === "") {
+      throw httpError(400, "bad_request", `${field} 必须是非空字符串（拒绝数字、布尔、对象、数组）`);
+    }
+    return value.trim();
+  }
   // 建档等写入接口不得携带这些系统保留字段
   const RESERVED_FIELDS = ["id", "version", "ropes", "plans", "lastSafeResult", "tasks", "logs"];
   function rejectReserved(input) {
@@ -198,46 +232,48 @@ export function createApp(store, { now = () => new Date() } = {}) {
   // 对原始登记输入做空值级校验（在 normalize 之前，避免空串被 Number() 转成 0）
   function validateRopePayload(input) {
     requireObject(input, "索登记");
+    requireKnownFields(input, ["ropes"], "索登记");
     if (!Array.isArray(input.ropes) || !input.ropes.length) {
       throw httpError(400, "bad_request", "ropes 必须是非空数组");
     }
+    const ROPE_FIELDS = ["id", "name", "tension", "min", "max", "influence"];
     for (const r of input.ropes) {
       if (!r || typeof r !== "object" || Array.isArray(r)) {
         throw httpError(400, "bad_request", "每根索必须是对象");
       }
-      const id = String(r.id ?? "").trim();
-      if (!id) throw httpError(400, "bad_request", "索 id 不能为空");
-      strictNumber(r.tension, `索 ${id} 当前张力`);
-      strictNumber(r.min, `索 ${id} 安全下限`);
-      strictNumber(r.max, `索 ${id} 安全上限`);
-      if (r.influence !== undefined && (!r.influence || typeof r.influence !== "object" || Array.isArray(r.influence))) {
-        throw httpError(400, "bad_request", `索 ${id} 的影响系数必须是对象`);
-      }
-      if (r.name !== undefined && typeof r.name !== "string") {
-        throw httpError(400, "bad_request", `索 ${id} 的名称必须是字符串`);
-      }
-      for (const [k, v] of Object.entries(r.influence ?? {})) {
-        if (!String(k).trim()) throw httpError(400, "bad_request", `索 ${id} 的影响系数键不能为空`);
-        strictNumber(v, `索 ${id} 对 ${k} 的影响系数`);
+      requireKnownFields(r, ROPE_FIELDS, "索");
+      requireId(r.id, "索 id");
+      strictNumber(r.tension, `索 ${r.id} 当前张力`);
+      strictNumber(r.min, `索 ${r.id} 安全下限`);
+      strictNumber(r.max, `索 ${r.id} 安全上限`);
+      requireOptionalString(r.name, `索 ${r.id} 名称`);
+      if (r.influence !== undefined) {
+        requirePlainObject(r.influence, `索 ${r.id} 的影响系数`);
+        for (const [k, v] of Object.entries(r.influence)) {
+          if (!k.trim()) throw httpError(400, "bad_request", `索 ${r.id} 的影响系数键不能为空`);
+          if (typeof k !== "string") throw httpError(400, "bad_request", `索 ${r.id} 的影响系数键必须是字符串`);
+          strictNumber(v, `索 ${r.id} 对 ${k} 的影响系数`);
+        }
       }
     }
   }
   // 方案预览载荷：{ targets: [{ id, target }] }；null/空对象/类型错误一律 400
   function validatePlanPayload(input) {
     requireObject(input, "方案预览");
+    requireKnownFields(input, ["targets"], "方案预览");
     if (!Array.isArray(input.targets) || !input.targets.length) {
       throw httpError(400, "bad_request", "targets 必须是非空数组");
     }
+    const TARGET_FIELDS = ["id", "target"];
     for (const t of input.targets) {
       if (!t || typeof t !== "object" || Array.isArray(t)) {
         throw httpError(400, "bad_request", "targets 每项必须是对象");
       }
-      if (t.id === undefined || t.id === null || String(t.id).trim() === "") {
-        throw httpError(400, "bad_request", "目标索 id 必须是非空字符串");
-      }
+      requireKnownFields(t, TARGET_FIELDS, "目标");
+      requireId(t.id, "目标索 id");
       strictNumber(t.target, `索 ${t.id} 的目标张力`);
     }
-    return input.targets.map(t => ({ id: String(t.id).trim(), target: Number(t.target) }));
+    return input.targets.map(t => ({ id: t.id.trim(), target: Number(t.target) }));
   }
   function validateRopeInput(ropes) {
     try {
@@ -316,22 +352,32 @@ export function createApp(store, { now = () => new Date() } = {}) {
       if (req.method === "POST" && url.pathname === "/api/items") {
         const input = requireObject(await body(req), "建档");
         rejectReserved(input); // 建档不得覆盖版本/索集合/方案/日志等系统字段
-        requireString(input.code, "模型编号 code");
-        if (input.shipType !== undefined && typeof input.shipType !== "string") {
-          throw httpError(400, "bad_request", "船型 shipType 必须是字符串");
-        }
-        if (input.owner !== undefined && typeof input.owner !== "string") {
-          throw httpError(400, "bad_request", "负责人 owner 必须是字符串");
-        }
-        if (input.ownerToken !== undefined && typeof input.ownerToken !== "string") {
-          throw httpError(400, "bad_request", "ownerToken 必须是字符串");
-        }
+        const CREATE_FIELDS = ["code", "shipType", "scale", "mastCount", "riggingMaterial", "owner", "ownerToken", "dueDate", "status"];
+        requireKnownFields(input, CREATE_FIELDS, "建档");
+        requireId(input.code, "模型编号 code");
+        requireOptionalString(input.shipType, "船型 shipType");
+        requireOptionalString(input.scale, "比例 scale");
+        requireOptionalString(input.riggingMaterial, "帆索材料 riggingMaterial");
+        requireOptionalString(input.owner, "负责人 owner");
+        requireOptionalString(input.ownerToken, "ownerToken");
         if (input.mastCount !== undefined && input.mastCount !== "") {
           strictNumber(input.mastCount, "桅杆数量 mastCount");
         }
+        requireOptionalDate(input.dueDate, "交付日期 dueDate");
         if (input.status !== undefined && !statLabels.includes(input.status)) {
           throw httpError(400, "bad_request", `status 必须是以下之一：${statLabels.join("、")}`);
         }
+        const clean = {
+          code: input.code.trim(),
+          ...(input.shipType !== undefined && { shipType: input.shipType }),
+          ...(input.scale !== undefined && { scale: input.scale }),
+          ...(input.mastCount !== undefined && input.mastCount !== "" && { mastCount: Number(input.mastCount) }),
+          ...(input.riggingMaterial !== undefined && { riggingMaterial: input.riggingMaterial }),
+          ...(input.owner !== undefined && { owner: input.owner }),
+          ...(input.ownerToken !== undefined && { ownerToken: input.ownerToken }),
+          ...(input.dueDate !== undefined && input.dueDate !== "" && { dueDate: input.dueDate }),
+          ...(input.status !== undefined && { status: input.status }),
+        };
         const item = await store.mutate(d => {
           const it = {
             id: newId("MR-"),
@@ -339,11 +385,11 @@ export function createApp(store, { now = () => new Date() } = {}) {
             ropes: [],
             plans: [],
             lastSafeResult: null,
-            ...input,
+            ...clean,
             tasks: [],
             logs: [{ at: now().toISOString(), step: "建档", note: "创建模型" }],
           };
-          it.ownerToken = input.ownerToken || operatorOf(req) || asciiToken(input.owner) || "";
+          it.ownerToken = clean.ownerToken || operatorOf(req) || asciiToken(clean.owner) || "";
           d.items.unshift(it);
           return it;
         });
@@ -360,11 +406,9 @@ export function createApp(store, { now = () => new Date() } = {}) {
       if (detail && req.method === "PATCH") {
         const key = decodeURIComponent(detail[1]);
         const input = requireObject(await body(req), "状态变更");
-        if (Object.keys(input).some(k => k !== "status")) {
-          throw httpError(400, "bad_request", "该接口仅允许更新 status 字段");
-        }
+        requireKnownFields(input, ["status"], "状态变更");
         if (!("status" in input)) throw httpError(400, "bad_request", "缺少 status 字段");
-        requireString(input.status, "status");
+        requireId(input.status, "status");
         if (!statLabels.includes(input.status)) {
           throw httpError(400, "bad_request", `status 必须是以下之一：${statLabels.join("、")}`);
         }
@@ -382,12 +426,12 @@ export function createApp(store, { now = () => new Date() } = {}) {
       if (logPath && req.method === "POST") {
         const key = decodeURIComponent(logPath[1]);
         const input = requireObject(await body(req), "备注");
-        if (!("note" in input) || typeof input.note !== "string" || input.note.trim() === "") {
+        requireKnownFields(input, ["note", "step"], "备注");
+        if (!("note" in input)) throw httpError(400, "bad_request", "缺少 note 字段");
+        if (typeof input.note !== "string" || input.note.trim() === "") {
           throw httpError(400, "bad_request", "note 必须是非空字符串");
         }
-        if (input.step !== undefined && typeof input.step !== "string") {
-          throw httpError(400, "bad_request", "step 必须是字符串");
-        }
+        requireOptionalString(input.step, "step");
         const item = await store.mutate(d => {
           const it = findItem(d, key);
           pushLog(it, input.step || "记录", input.note);
@@ -401,13 +445,12 @@ export function createApp(store, { now = () => new Date() } = {}) {
       if (actionPath && req.method === "POST") {
         const key = decodeURIComponent(actionPath[1]);
         const input = requireObject(await body(req), "帆索任务");
-        requireString(input.position, "索具位置 position");
-        if (input.tension === undefined || input.tension === null || typeof input.tension !== "string" || input.tension.trim() === "") {
-          throw httpError(400, "bad_request", "松紧状态 tension 必须是非空字符串");
+        requireKnownFields(input, ["position", "tension", "note"], "帆索任务");
+        requireId(input.position, "索具位置 position");
+        if (typeof input.tension !== "string" || input.tension.trim() === "") {
+          throw httpError(400, "bad_request", "松紧状态 tension 必须是非空字符串（拒绝数字、布尔、对象、数组）");
         }
-        if (input.note !== undefined && typeof input.note !== "string") {
-          throw httpError(400, "bad_request", "note 必须是字符串");
-        }
+        requireOptionalString(input.note, "note");
         const item = await store.mutate(d => {
           const it = findItem(d, key);
           it.tasks ||= [];
@@ -499,6 +542,7 @@ export function createApp(store, { now = () => new Date() } = {}) {
           throw httpError(400, "bad_request", "应用请求体必须是对象");
         }
         const input = raw ?? {};
+        requireKnownFields(input, ["expectedVersion"], "应用");
         if (input.expectedVersion !== undefined) {
           strictNumber(input.expectedVersion, "expectedVersion");
         }
@@ -571,6 +615,7 @@ export function createApp(store, { now = () => new Date() } = {}) {
         if (!undoRaw || typeof undoRaw !== "object" || Array.isArray(undoRaw)) {
           throw httpError(400, "bad_request", "撤销请求体必须是对象（可传 {}）");
         }
+        requireKnownFields(undoRaw, [], "撤销");
         const item = await store.mutate(d => {
           const it = findItem(d, key);
           authorize(it, operator);

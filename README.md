@@ -28,12 +28,12 @@ npm run test:e2e   # 真实 Chromium 端到端：成功 / 无解 / 冲突
 ### 鉴权与输入约束
 
 - 联调写接口（索登记 / 预览 / 应用 / 撤销）与详情读取（模型详情、方案列表）要求 `X-Operator` 请求头（百分号编码）；模型有负责人时，非负责人返回 403。建档/列表等原有接口保持无鉴权，且**列表视图不返回**索集合、方案、上次安全结果、令牌。
-- **所有写接口统一请求体校验**：空请求体、`null`、数组、标量、空对象（缺少必填字段）、字段缺失或类型错误，一律返回 400 `bad_request` 并给出中文字段名提示；校验全部在落库前完成，被拒绝时原数据、版本号与磁盘文件均不变。
-  - 建档必须有非空字符串 `code`；`status` 必须是合法阶段；`mastCount` 必须是数值（空串视为未填）；受保护字段（`id/version/ropes/plans/lastSafeResult/tasks/logs`）返回 400 `reserved_field`。
-  - PATCH 仅允许 `status`；备注必须有非空 `note`；帆索任务必须有非空 `position`、`tension` 字符串。
-  - 索登记 `ropes` 必须是非空对象数组，每根索需要非空 `id` 与有限数值 `tension/min/max`，`influence` 必须是对象且每个系数是有限数值。
-  - 方案预览 `targets` 必须是非空对象数组，每项需要非空 `id` 与有限数值 `target`。
-  - 应用允许空 `{}` 体（幂等），但若带 `expectedVersion` 必须是数值；撤销体必须是对象。
+- **所有写接口统一请求体校验**：空请求体、`null`、数组、标量、空对象（缺少必填字段）、字段缺失、**未知字段**或类型错误，一律返回 400 `bad_request` 并给出中文字段名提示；校验全部在落库前完成，被拒绝时原数据、版本号与磁盘文件均不变。
+  - 建档采用字段白名单（`code/shipType/scale/mastCount/riggingMaterial/owner/ownerToken/dueDate/status`）：`code` 必须是非空字符串；`scale/riggingMaterial/shipType/owner/ownerToken` 必须是字符串；`dueDate` 必须是真实的 `YYYY-MM-DD`；`mastCount` 必须是数值（空串视为未填）；`status` 必须是合法阶段；受保护字段（`id/version/ropes/plans/lastSafeResult/tasks/logs`）返回 400 `reserved_field`。
+  - PATCH 仅允许 `status`；备注仅允许 `note`（非空字符串）/`step`；帆索任务仅允许 `position`/`tension`（均为非空字符串）/`note`。
+  - 索登记仅允许 `id/name/tension/min/max/influence`：**`id` 必须是非空字符串**（数字、布尔、对象、数组不再被隐式转字符串），`name` 必须是字符串，`tension/min/max` 与每个影响系数必须是有限数值，`influence` 必须是字符串键→数值的对象。
+  - 方案预览仅允许 `targets`（非空对象数组），每项 `id` 必须是非空字符串、`target` 必须是有限数值。
+  - 应用允许空 `{}` 体（幂等），但 `expectedVersion` 必须是数值；撤销体必须是对象且不含未知字段。
   - 非法 JSON 文本统一 400。
 - 同一安全结果只能撤销一次：重复撤销返回 409 且版本不推进。
 - 首次启动（无数据文件）写入的内置模型与旧版数据迁移后的模型，均自带 `id/version/ropes` 等字段，可直接联调。
