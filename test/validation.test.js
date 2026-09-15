@@ -287,6 +287,49 @@ test("应用/撤销：畸形请求体与 expectedVersion 类型错误 400，版�
   assert.equal(u.status, 200);
 });
 
+test("故障注入：只接受 { failNextWrites: 非负整数 }，反例不改变注入状态", async () => {
+  const item = await seedItem(env.call);
+  const setFault = async body => env.call("POST", "/api/_test/fault", body, {});
+  const addLog = async () => env.call("POST", `/api/items/${item.id}/logs`, { note: "消耗一次写" }, {});
+
+  const ok = await setFault({ failNextWrites: 2 });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.failNextWrites, 2);
+
+  const badBodies = [
+    undefined, null, [], "x", true, 1, {},
+    { failNextWrites: undefined },
+    { failNextWrites: null },
+    { failNextWrites: -1 },
+    { failNextWrites: 1.5 },
+    { failNextWrites: "1" },
+    { failNextWrites: "" },
+    { failNextWrites: [] },
+    { failNextWrites: {} },
+    { failNextWrites: true },
+    { failNextWrites: 0, unknown: 1 },
+  ];
+  for (const body of badBodies) {
+    const r = await setFault(body);
+    assert.equal(r.status, 400, JSON.stringify(body) + " -> " + r.status + " " + JSON.stringify(r.data).slice(0, 120));
+    assert.equal(r.data.error, "bad_request");
+  }
+
+  // 若注入状态被反例错误改成 0/1，下面前两次写就不会都失败
+  const f1 = await addLog();
+  const f2 = await addLog();
+  assert.equal(f1.status, 500, "第一次写应消费注入故障并失败");
+  assert.equal(f2.status, 500, "第二次写应消费注入故障并失败");
+  const f3 = await addLog();
+  assert.equal(f3.status, 201, "故障次数耗尽后第三次写应成功");
+
+  const zero = await setFault({ failNextWrites: 0 });
+  assert.equal(zero.status, 200);
+  assert.equal(zero.data.failNextWrites, 0);
+  const normal = await addLog();
+  assert.equal(normal.status, 201);
+});
+
 test("非法 JSON 文本在所有写接口返回 400 且不改数据", async () => {
   const item = await seedItem(env.call);
   const before = await readFile(env.dbPath, "utf8");

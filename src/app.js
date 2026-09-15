@@ -642,10 +642,16 @@ export function createApp(store, { now = () => new Date() } = {}) {
         return send(res, 200, { version: item.version, lastSafeResult: item.lastSafeResult, ropes: item.ropes });
       }
 
-      // 测试故障注入
+      // 测试故障注入（仅 ALLOW_FAULT=1）：只接受 { failNextWrites: 非负整数 }
       if (req.method === "POST" && url.pathname === "/api/_test/fault" && process.env.ALLOW_FAULT === "1") {
-        const input = await body(req);
-        store.failNextWrites = Math.max(0, Number(input.failNextWrites) || 0);
+        const input = requireObject(await body(req), "故障注入");
+        requireKnownFields(input, ["failNextWrites"], "故障注入");
+        if (typeof input.failNextWrites !== "number"
+          || !Number.isInteger(input.failNextWrites)
+          || input.failNextWrites < 0) {
+          throw httpError(400, "bad_request", "failNextWrites 必须是非负整数");
+        }
+        store.failNextWrites = input.failNextWrites;
         return send(res, 200, { ok: true, failNextWrites: store.failNextWrites });
       }
 

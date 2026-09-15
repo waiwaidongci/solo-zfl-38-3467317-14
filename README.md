@@ -4,7 +4,7 @@
 
 ```bash
 npm start          # http://localhost:3038
-npm test           # 单元/接口/并发/回滚/持久化测试（31 项）
+npm test           # 单元/接口/并发/回滚/持久化/严格校验测试（51 项）
 npm run test:e2e   # 真实 Chromium 端到端：成功 / 无解 / 冲突
 ```
 
@@ -42,10 +42,13 @@ npm run test:e2e   # 真实 Chromium 端到端：成功 / 无解 / 冲突
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/items/:id/ropes` | 登记/更新索（upsert，校验合并后的完整集合） |
+| GET | `/api/items/:id` | 模型详情（需 `X-Operator` 且不得越权；返回索集合/版本/上次安全结果） |
+| GET | `/api/items/:id/plans` | 方案列表（需 `X-Operator` 且不得越权） |
+| POST | `/api/items/:id/ropes` | 登记/更新索（upsert，严格字段白名单，校验合并后的完整集合） |
 | POST | `/api/items/:id/plans` | 方案预览；阻塞时 422 且 body 含 `preview`，不落库 |
-| GET | `/api/items/:id/plans` | 方案列表 |
-| POST | `/api/items/:id/plans/:pid/apply` | 原子应用（幂等/并发唯一/版本校验/应用前复算） |
-| POST | `/api/items/:id/plans/:pid/undo` | 撤销上次安全结果 |
+| POST | `/api/items/:id/plans/:pid/apply` | 原子应用（空 `{}` 体可幂等；支持数值 `expectedVersion`） |
+| POST | `/api/items/:id/plans/:pid/undo` | 撤销上次安全结果（空 `{}` 体，重复撤销 409） |
 
-原接口 `/api/items`（GET/POST/PATCH）、`/logs`、`/action`、`/stats` 行为不变。
+原建档、帆索任务、状态、备注、统计接口的**路径和正常业务流程保持可用**，但写接口现在统一执行严格请求体/字段类型校验；模型详情也已纳入操作员鉴权。`GET /api/items` 列表仍无需鉴权，但会剥离联调敏感字段。
+
+测试专用故障注入接口仅在 `ALLOW_FAULT=1` 时启用：`POST /api/_test/fault`，请求体必须是 `{ "failNextWrites": 非负整数 }`；空体、`null`、数组、布尔、数字、小数字符串、负整数和未知字段均返回 400，且不改变当前注入次数。
